@@ -2,7 +2,6 @@ import org.datavec.api.io.labels.ParentPathLabelGenerator;
 import org.datavec.api.split.FileSplit;
 import org.datavec.image.loader.NativeImageLoader;
 import org.datavec.image.recordreader.ImageRecordReader;
-import org.deeplearning4j.api.storage.StatsStorage;
 import org.deeplearning4j.datasets.datavec.RecordReaderDataSetIterator;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
@@ -38,75 +37,50 @@ public class CIFAR10 {
     static int seed = 98;
     static int labelIndex = 1;
     static double learningRate = 0.001;
+    private final String mode;
+    private MultiLayerNetwork model;
+
 
     public static void main(String[] args) throws IOException {
 
-        MultiLayerNetwork model;
-        try {
-            System.out.println("Loading The model");
-            model = ModelSerializer.restoreMultiLayerNetwork(new File(basePath + "\\model.zip"));
-        } catch (IOException ignored) {
-            CIFAR10 cifar10 = new CIFAR10();
-            model = cifar10.buildModel();
-        }
+        CIFAR10 cifar10 = new CIFAR10("build");
 
-
-        Random randomGenNum = new Random(seed);
-        System.out.println("Loading training Data");
-        File trainDataFile = new File(basePath + "\\train");
-        FileSplit trainFileSplit = new FileSplit(trainDataFile, NativeImageLoader.ALLOWED_FORMATS, randomGenNum);
-        ParentPathLabelGenerator labelMarker = new ParentPathLabelGenerator();
-        ImageRecordReader trainImageRecordReader = new ImageRecordReader(height, width, channels, labelMarker);
-        trainImageRecordReader.initialize(trainFileSplit);
-        DataSetIterator trainDataSetIterator = new
-                RecordReaderDataSetIterator(trainImageRecordReader, batchSize, labelIndex, outputNum);
-        DataNormalization scalar = new ImagePreProcessingScaler(0, 1);
-        trainDataSetIterator.setPreProcessor(scalar);
-
-        System.out.println("Loading testing Data");
-        File testDataFile = new File(basePath + "\\test");
-        FileSplit testFileSplit = new FileSplit(testDataFile, NativeImageLoader.ALLOWED_FORMATS, randomGenNum);
-        ImageRecordReader testImageRecordReader = new ImageRecordReader(height, width, channels, labelMarker);
-        testImageRecordReader.initialize(testFileSplit);
-
-        DataSetIterator testDataSetIterator = new
-                RecordReaderDataSetIterator(testImageRecordReader, batchSize, labelIndex, outputNum);
-        testDataSetIterator.setPreProcessor(scalar);
-
+        //Initialize the user interface backend
         UIServer uiServer = UIServer.getInstance();
-//        StatsStorage statsStorage = new FileStatsStorage(new File(System.getProperty("java.io.tmpdir"), "ui-stats.dl4j"));
-        StatsStorage statsStorage = new InMemoryStatsStorage();
-        uiServer.attach(statsStorage);
-        model.setListeners(new StatsListener(statsStorage));
+        //Configure where the network information (gradients, score vs. time etc) is to be stored. Here: store in memory.
+        InMemoryStatsStorage inMemoryStatsStorage = new InMemoryStatsStorage();
+        //Attach the StatsStorage instance to the UI: this allows the contents of the StatsStorage to be visualized
+        uiServer.attach(inMemoryStatsStorage);
+        //Then add the StatsListener to collect this information from the network, as it trains
+        cifar10.getModel().setListeners(new StatsListener(inMemoryStatsStorage));
+
+        cifar10.trainModelAndEvaluate();
 
 
-        System.out.println("Total params:" + model.numParams());
-        Evaluation evaluation = model.evaluate(testDataSetIterator);
-        double startingAccuracy = evaluation.accuracy();
-        System.out.println("Starting accuracy " + startingAccuracy);
-        for (int i = 0; i < epochCount; i++) {
-            testDataSetIterator.reset();
-            trainDataSetIterator.reset();
-
-
-            System.out.println("old accuracy " + startingAccuracy);
-            System.out.println("new accuracy " + evaluation.accuracy());
-
-            System.out.println("Epoch " + (i + 1));
-            model.fit(trainDataSetIterator);
-            evaluation = model.evaluate(testDataSetIterator);
-            System.out.println(evaluation.stats());
-            if (evaluation.accuracy() > startingAccuracy) {
-                startingAccuracy = evaluation.accuracy();
-                System.out.println("Saving model !");
-                ModelSerializer.writeModel(model, new File(basePath + "\\model.zip"), true);
-            }
-        }
     }
 
-    public MultiLayerNetwork buildModel() {
+    public CIFAR10(String mode) {
+        this.mode = mode;
+        try {
+            if (this.mode.equals("load")) {
+                System.out.println("Loading The model");
+                this.model = ModelSerializer.restoreMultiLayerNetwork(new File(basePath + "\\model.zip"));
+            } else if (this.mode.equals("build")) {
+                this.buildModel();
+            }
+        } catch (IOException ignored) {
+            this.buildModel();
+        }
+
+    }
+
+    public MultiLayerNetwork getModel() {
+        return model;
+    }
+
+    public void buildModel() {
         System.out.println("Building the model...");
-        MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder()
+        MultiLayerConfiguration configuration = new NeuralNetConfiguration.Builder()
                 .seed(seed)
                 .updater(new Adam(learningRate))
                 .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
@@ -145,8 +119,62 @@ public class CIFAR10 {
                 .setInputType(InputType.convolutional(height, width, channels))
                 .build();
 
-        MultiLayerNetwork model = new MultiLayerNetwork(conf);
-        model.init();
-        return model;
+        this.model = new MultiLayerNetwork(configuration);
+        this.model.init();
+    }
+
+    public DataSetIterator getDataSetIterator(String mode) throws IOException {
+
+
+        File dataFile;
+        if (mode.equals("train")) {
+            dataFile = new File(basePath + "\\train");
+        } else {
+            dataFile = new File(basePath + "\\test");
+        }
+        Random randomGenNum = new Random(seed);
+        System.out.println("Loading " + mode + " Data");
+        FileSplit trainFileSplit = new FileSplit(dataFile, NativeImageLoader.ALLOWED_FORMATS, randomGenNum);
+        ParentPathLabelGenerator labelMarker = new ParentPathLabelGenerator();
+        ImageRecordReader imageRecordReader = new ImageRecordReader(height, width, channels, labelMarker);
+        imageRecordReader.initialize(trainFileSplit);
+        DataSetIterator dataSetIterator = new RecordReaderDataSetIterator(imageRecordReader, batchSize, labelIndex, outputNum);
+        DataNormalization scalar = new ImagePreProcessingScaler(0, 1);
+        dataSetIterator.setPreProcessor(scalar);
+
+        return dataSetIterator;
+    }
+
+    public void trainModelAndEvaluate() throws IOException {
+
+        DataSetIterator trainDataSetIterator = this.getDataSetIterator("train");
+        DataSetIterator testSetIterator = this.getDataSetIterator("test");
+
+        Evaluation evaluation;
+        double startingAccuracy = 0;
+        if (this.mode.equals("load")) {
+            evaluation = model.evaluate(testSetIterator);
+            startingAccuracy = evaluation.accuracy();
+            System.out.println("Starting accuracy " + startingAccuracy);
+        }
+        int i = 1;
+        while (startingAccuracy < 1.0) {
+            testSetIterator.reset();
+            trainDataSetIterator.reset();
+
+
+            System.out.println("Epoch " + (i++));
+            model.fit(trainDataSetIterator);
+            evaluation = model.evaluate(testSetIterator);
+            System.out.println("old accuracy " + startingAccuracy);
+            System.out.println("new accuracy " + evaluation.accuracy());
+            if (evaluation.accuracy() > startingAccuracy) {
+                startingAccuracy = evaluation.accuracy();
+                System.out.println("Saving model !");
+                ModelSerializer.writeModel(model, new File("model.zip"), true);
+            }
+
+            System.out.println(evaluation.stats());
+        }
     }
 }
